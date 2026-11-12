@@ -1,0 +1,16 @@
+{
+  "actorSpecification": 1,
+  "name": "aliexpress-scraper",
+  "title": "AliExpress Dropshipping Scraper (Winning Products, Orders & Shipping)",
+  "description": "AliExpress Scraper: Extract product listings, real order counts, live discount prices, customer ratings, image reviews, SKU variations, seller feedback, and shipping methods at scale. Ideal for dropshipping research, finding viral winning items, and competitor retail price tracking online.",
+  "version": "1.0",
+  "meta": {
+    "templateId": "js-crawlee-playwright"
+  },
+  "dockerfile": "../Dockerfile",
+  "input": "./input_schema.json",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  },
+  "output": "./output_schema.json"
+}
