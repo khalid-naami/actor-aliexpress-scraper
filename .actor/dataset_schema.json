@@ -1,88 +1,178 @@
 {
-  "actorSpecification": 1,
-  "fields": {
-    "type": "object",
-    "properties": {
-      "itemId": {
-        "type": "string",
-        "description": "AliExpress unique numerical item ID"
-      },
-      "title": {
-        "type": "string",
-        "description": "Full product title"
-      },
-      "price": {
-        "type": "number",
-        "description": "Current active discounted price"
-      },
-      "originalPrice": {
-        "type": "number",
-        "description": "Original retail price before discount"
-      },
-      "discount": {
-        "type": "string",
-        "description": "Discount percentage (e.g. -50%)"
-      },
-      "currency": {
-        "type": "string",
-        "description": "Currency code (USD, EUR, etc.)"
-      },
-      "ordersCount": {
-        "type": "string",
-        "description": "Total sales volume text (e.g. '5,000+ sold')"
-      },
-      "ordersCountNumber": {
-        "type": "integer",
-        "description": "Numeric sales volume count"
-      },
-      "rating": {
-        "type": "number",
-        "description": "Average review rating (0.0 to 5.0)"
-      },
-      "reviewsCount": {
-        "type": "integer",
-        "description": "Total customer reviews and ratings count"
-      },
-      "storeName": {
-        "type": "string",
-        "description": "AliExpress merchant / store name"
-      },
-      "storeRating": {
-        "type": "string",
-        "description": "Store positive feedback percentage (e.g. 98.2%)"
-      },
-      "shippingFee": {
-        "type": "string",
-        "description": "Shipping cost or 'Free Shipping'"
-      },
-      "shippingMethod": {
-        "type": "string",
-        "description": "Shipping carrier or service method"
-      },
-      "deliveryDate": {
-        "type": "string",
-        "description": "Estimated delivery date timeframe"
-      },
-      "variants": {
-        "type": "array",
-        "description": "List of available product SKU variants, colors, and sizes"
-      },
-      "thumbnail": {
-        "type": "string",
-        "description": "Primary high-resolution product image URL"
-      },
-      "images": {
-        "type": "array",
-        "description": "Full gallery of high-resolution product photos"
-      },
-      "url": {
-        "type": "string",
-        "description": "Canonical AliExpress product URL"
-      },
-      "scrapedAt": {
-        "type": "string",
-        "description": "Timestamp of extraction"
-      }
+    "actorSpecification": 1,
+    "fields": {
+        "type": "object",
+        "properties": {
+            "itemId": {
+                "type": "string",
+                "description": "AliExpress unique numerical item ID",
+                "nullable": true
+            },
+            "title": {
+                "type": "string",
+                "description": "Full product title",
+                "nullable": true
+            },
+            "price": {
+                "type": "number",
+                "description": "Current active discounted price",
+                "nullable": true
+            },
+            "originalPrice": {
+                "type": "number",
+                "description": "Original retail price before discount",
+                "nullable": true
+            },
+            "discount": {
+                "type": "string",
+                "description": "Discount percentage (e.g. -50%)",
+                "nullable": true
+            },
+            "currency": {
+                "type": "string",
+                "description": "Currency code (USD, EUR, etc.)",
+                "nullable": true
+            },
+            "ordersCount": {
+                "type": "string",
+                "description": "Total sales volume text (e.g. '5,000+ sold')",
+                "nullable": true
+            },
+            "ordersCountNumber": {
+                "type": "integer",
+                "description": "Numeric sales volume count",
+                "nullable": true
+            },
+            "rating": {
+                "type": "number",
+                "description": "Average review rating (0.0 to 5.0)",
+                "nullable": true
+            },
+            "reviewsCount": {
+                "type": "integer",
+                "description": "Total customer reviews and ratings count",
+                "nullable": true
+            },
+            "storeName": {
+                "type": "string",
+                "description": "AliExpress merchant / store name",
+                "nullable": true
+            },
+            "storeRating": {
+                "type": "string",
+                "description": "Store positive feedback percentage (e.g. 98.2%)",
+                "nullable": true
+            },
+            "shippingFee": {
+                "type": "string",
+                "description": "Shipping cost or 'Free Shipping'",
+                "nullable": true
+            },
+            "shippingMethod": {
+                "type": "string",
+                "description": "Shipping carrier or service method",
+                "nullable": true
+            },
+            "deliveryDate": {
+                "type": "string",
+                "description": "Estimated delivery date timeframe",
+                "nullable": true
+            },
+            "variants": {
+                "type": "array",
+                "description": "List of available product SKU variants, colors, and sizes",
+                "nullable": true,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "required": []
+                }
+            },
+            "thumbnail": {
+                "type": "string",
+                "description": "Primary high-resolution product image URL",
+                "nullable": true
+            },
+            "images": {
+                "type": "array",
+                "description": "Full gallery of high-resolution product photos",
+                "nullable": true,
+                "items": {
+                    "type": "string"
+                }
+            },
+            "searchKeyword": {
+                "type": "string",
+                "description": "Search keyword used when discovered via AliExpress search",
+                "nullable": true
+            },
+            "url": {
+                "type": "string",
+                "description": "Canonical AliExpress product URL",
+                "nullable": true
+            },
+            "scrapedAt": {
+                "type": "string",
+                "description": "Timestamp of extraction",
+                "nullable": true
+            }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": true,
+        "required": []
+    },
+    "views": {
+        "overview": {
+            "title": "Overview",
+            "transformation": {
+                "fields": [
+                    "itemId",
+                    "title",
+                    "price",
+                    "originalPrice",
+                    "discount",
+                    "currency",
+                    "ordersCount",
+                    "ordersCountNumber"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "itemId": {
+                        "label": "itemId",
+                        "format": "text"
+                    },
+                    "title": {
+                        "label": "title",
+                        "format": "text"
+                    },
+                    "price": {
+                        "label": "price",
+                        "format": "number"
+                    },
+                    "originalPrice": {
+                        "label": "originalPrice",
+                        "format": "number"
+                    },
+                    "discount": {
+                        "label": "discount",
+                        "format": "text"
+                    },
+                    "currency": {
+                        "label": "currency",
+                        "format": "text"
+                    },
+                    "ordersCount": {
+                        "label": "ordersCount",
+                        "format": "text"
+                    },
+                    "ordersCountNumber": {
+                        "label": "ordersCountNumber",
+                        "format": "number"
+                    }
+                }
+            }
+        }
     }
-  }
 }
