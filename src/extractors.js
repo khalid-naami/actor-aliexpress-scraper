@@ -15,6 +15,7 @@ export function extractAliExpressItemId(url) {
  * Clean numeric price
  */
 export function parseAliPrice(raw) {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
     if (!raw || typeof raw !== 'string') return null;
     const cleaned = raw.replace(/[^0-9.,]/g, '').trim();
     if (!cleaned) return null;
@@ -28,6 +29,7 @@ export function parseAliPrice(raw) {
  * Clean numeric orders count (e.g. "5,000+ sold" -> 5000)
  */
 export function parseAliOrdersCount(raw) {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? Math.trunc(raw) : 0;
     if (!raw || typeof raw !== 'string') return 0;
     const digits = raw.replace(/[^\d]/g, '');
     return digits ? parseInt(digits, 10) : 0;
@@ -37,6 +39,7 @@ export function parseAliOrdersCount(raw) {
  * Clean star rating
  */
 export function parseAliRating(raw) {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
     if (!raw || typeof raw !== 'string') return null;
     const match = raw.replace(',', '.').match(/([0-5]\.[0-9]|[0-5])/);
     return match ? parseFloat(match[1]) : null;
