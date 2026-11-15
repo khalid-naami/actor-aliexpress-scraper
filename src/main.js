@@ -2,6 +2,7 @@ import { Actor, log } from 'apify';
 import { gotScraping } from 'got-scraping';
 import { chromium } from 'playwright';
 import {
+    detectAliExpressPageState,
     extractAliExpressItemId,
     parseAliExpressProductHtml,
     parseAliExpressSearchHtml,
@@ -24,11 +25,28 @@ function sanitizeRecord(obj) {
 }
 
 function isProxyTransportError(errOrStatus) {
+    if (errOrStatus === 597 || errOrStatus === 407 || errOrStatus === 502) return true;
     const msg = String(errOrStatus?.message || errOrStatus || '');
-    return errOrStatus === 597 || errOrStatus === 407 || /597|UPSTREAM407|407|Proxy responded with|tunneling socket/i.test(msg);
+    return /597|UPSTREAM407|407|502|Proxy responded with|tunneling socket|ERR_TUNNEL|ERR_PROXY|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|socket hang up/i.test(msg);
 }
 
 await Actor.init();
+
+let browser = null;
+const closeBrowser = async () => {
+    if (!browser) return;
+    const instance = browser;
+    browser = null;
+    try {
+        await instance.close();
+    } catch {
+        // Ignore close errors during rotation or shutdown
+    }
+};
+
+Actor.on('aborting', async () => {
+    await closeBrowser();
+});
 
 try {
     const input = (await Actor.getInput()) || {};
@@ -41,11 +59,12 @@ try {
         proxyConfiguration,
     } = input;
 
-    log.info(`Starting AliExpress Dropshipping Scraper (Ship to: ${shipToCountry}, Sort: ${sortBy})...`);
+    const cleanCountry = String(shipToCountry || 'US').toUpperCase();
+    log.info(`Starting AliExpress Dropshipping Scraper (Ship to: ${cleanCountry}, Sort: ${sortBy})...`);
 
-    // Setup Proxy
     let proxyConfig = null;
     let proxyUrl = undefined;
+    let proxyFailureCount = 0;
     if (proxyConfiguration) {
         try {
             proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
@@ -58,27 +77,24 @@ try {
         }
     }
 
-    const rotateOrDisableProxy = async (err) => {
-        if (!isProxyTransportError(err)) return;
-        if (proxyConfig) {
+    const rotateOrDisableProxy = async (errOrStatus) => {
+        if (!proxyUrl || !isProxyTransportError(errOrStatus)) return false;
+        proxyFailureCount++;
+        await closeBrowser();
+        if (proxyConfig && proxyFailureCount <= 1) {
             try {
                 proxyUrl = await proxyConfig.newUrl();
                 log.warning('Rotated Apify Proxy session after upstream proxy transport error.');
-                return;
+                return true;
             } catch {
                 // Fall through to disable proxy
             }
         }
         proxyUrl = undefined;
-        log.warning('Disabled broken proxy session; falling back to direct connection.');
+        log.warning('Disabled broken proxy session after transport failures; falling back to direct connection.');
+        return true;
     };
 
-    let totalProductsScraped = 0;
-    let freeShippingCount = 0;
-    let totalOrdersCaptured = 0;
-
-    // Browser Helper for Anti-Bot Fallback
-    let browser = null;
     const getBrowser = async () => {
         if (!browser) {
             const launchOptions = {
@@ -107,10 +123,79 @@ try {
         return browser;
     };
 
-    const effectiveProductUrls = Array.isArray(productUrls) && productUrls.length > 0
-        ? productUrls
-        : (!Array.isArray(searchKeywords) || searchKeywords.length === 0)
-            ? ['https://www.aliexpress.com/item/1005006245389123.html']
+    const headers = {
+        'accept-language': 'en-US,en;q=0.9',
+        'cookie': `aep_usuc_f=site=glo&c_tp=USD&region=${cleanCountry}&b_locale=en_US;`,
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    };
+
+    const fetchHtmlWithHttp = async (url) => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                const response = await gotScraping({
+                    url,
+                    proxyUrl,
+                    headers,
+                    timeout: { request: 25000 },
+                    throwHttpErrors: false,
+                });
+                if (isProxyTransportError(response.statusCode)) {
+                    const handled = await rotateOrDisableProxy(response.statusCode);
+                    if (handled) continue;
+                }
+                const html = response.body || '';
+                const pageState = detectAliExpressPageState(html, response.statusCode);
+                return { html, statusCode: response.statusCode, pageState };
+            } catch (err) {
+                const handled = await rotateOrDisableProxy(err);
+                log.debug(`gotScraping attempt ${attempt + 1} failed for ${url}: ${err.message}`);
+                if (!handled || attempt === 1) break;
+            }
+        }
+        return { html: '', statusCode: 0, pageState: { state: 'transport_error', reason: 'HTTP request failed' } };
+    };
+
+    const fetchWithPlaywright = async (url, { domExtractor = null } = {}) => {
+        for (let attempt = 0; attempt < 2; attempt++) {
+            let page = null;
+            try {
+                const b = await getBrowser();
+                page = await b.newPage();
+                await page.setExtraHTTPHeaders({
+                    'accept-language': 'en-US,en;q=0.9',
+                });
+                await page.route('**/*.{mp4,webm,avi,woff,woff2}', (route) => route.abort());
+                const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+                await page.waitForTimeout(2500);
+                const statusCode = resp ? resp.status() : 200;
+                const html = await page.content();
+                const domData = domExtractor ? await page.evaluate(domExtractor) : null;
+                return { html, statusCode, domData, pageState: detectAliExpressPageState(html, statusCode) };
+            } catch (bErr) {
+                const handled = await rotateOrDisableProxy(bErr);
+                log.warning(`Browser fallback error for ${url}: ${bErr.message}`);
+                if (!handled || attempt === 1) {
+                    return { html: '', statusCode: 0, domData: null, pageState: { state: 'browser_error', reason: bErr.message } };
+                }
+            } finally {
+                if (page) await page.close().catch(() => {});
+            }
+        }
+        return { html: '', statusCode: 0, domData: null, pageState: { state: 'browser_error', reason: 'Playwright attempts exhausted' } };
+    };
+
+    let totalProductsScraped = 0;
+    let freeShippingCount = 0;
+    let totalOrdersCaptured = 0;
+    const diagnostics = [];
+
+    const hasExplicitUrls = Array.isArray(productUrls) && productUrls.length > 0;
+    const hasExplicitKeywords = Array.isArray(searchKeywords) && searchKeywords.length > 0;
+    const effectiveProductUrls = hasExplicitUrls ? productUrls : [];
+    const effectiveSearchKeywords = hasExplicitKeywords
+        ? searchKeywords
+        : !hasExplicitUrls
+            ? ['wireless earbuds']
             : [];
 
     // 1. Process Direct Product URLs
@@ -118,49 +203,32 @@ try {
         log.info(`Processing ${effectiveProductUrls.length} direct AliExpress product URLs...`);
 
         for (const rawUrl of effectiveProductUrls) {
-            const targetUrl = typeof rawUrl === 'string' ? rawUrl : rawUrl?.url;
+            const targetUrl = typeof rawUrl === 'string' ? rawUrl.trim() : rawUrl?.url?.trim();
             if (!targetUrl) continue;
 
-            log.info(`Fetching AliExpress item: ${targetUrl}`);
+            const itemId = extractAliExpressItemId(targetUrl);
+            log.info(`Fetching AliExpress item: ${targetUrl}${itemId ? ` (ID: ${itemId})` : ''}`);
             let product = null;
+            let lastReason = null;
 
-            // Strategy A: gotScraping
-            try {
-                const response = await gotScraping({
-                    url: targetUrl,
-                    proxyUrl,
-                    headers: {
-                        'accept-language': 'en-US,en;q=0.9',
-                        'cookie': `aep_usuc_f=site=glo&c_tp=USD&region=${shipToCountry}&b_locale=en_US;`,
-                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-                    },
-                    timeout: { request: 30000 },
-                });
-
-                const html = response.body;
-                if (!html.includes('punish') && !html.includes('sec.aliexpress.com')) {
-                    product = parseAliExpressProductHtml(html, targetUrl);
-                }
-            } catch (err) {
-                await rotateOrDisableProxy(err);
-                log.debug(`gotScraping error for ${targetUrl}: ${err.message}`);
+            // Strategy A: HTTP
+            const httpRes = await fetchHtmlWithHttp(targetUrl);
+            if (httpRes.pageState.state === 'ok') {
+                product = parseAliExpressProductHtml(httpRes.html, targetUrl);
+            } else {
+                lastReason = httpRes.pageState.reason;
+                log.debug(`HTTP state for ${targetUrl}: ${httpRes.pageState.state} (${lastReason})`);
             }
 
-            // Strategy B: Browser fallback
-            if (!product || !product.title) {
-                try {
-                    log.info(`Launching browser renderer fallback for ${targetUrl}...`);
-                    const b = await getBrowser();
-                    const page = await b.newPage();
-                    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-                    await page.waitForTimeout(2500);
-
-                    const html = await page.content();
-                    product = parseAliExpressProductHtml(html, targetUrl);
-                    await page.close();
-                } catch (bErr) {
-                    await rotateOrDisableProxy(bErr);
-                    log.warning(`Browser fallback error for ${targetUrl}: ${bErr.message}`);
+            // Strategy B: Browser fallback (skip only if definitely 404/unavailable)
+            if ((!product || !product.title) && httpRes.pageState.state !== 'unavailable') {
+                log.info(`Launching browser renderer fallback for ${targetUrl}...`);
+                const pwRes = await fetchWithPlaywright(targetUrl);
+                if (pwRes.pageState.state === 'ok') {
+                    product = parseAliExpressProductHtml(pwRes.html, targetUrl);
+                }
+                if (!product || !product.title) {
+                    lastReason = pwRes.pageState.reason || lastReason;
                 }
             }
 
@@ -172,19 +240,20 @@ try {
 
                 log.info(`[${totalProductsScraped}] Scraped: "${product.title.slice(0, 40)}..." | Orders: ${product.ordersCount || 'N/A'} | Price: $${product.price ?? 'N/A'}`);
             } else {
-                log.warning(`Could not extract valid data from: ${targetUrl}`);
+                const reasonMsg = lastReason || 'Target page returned no parseable product details';
+                diagnostics.push({ target: targetUrl, reason: reasonMsg });
+                log.warning(`Could not extract valid data from ${targetUrl}: ${reasonMsg}`);
             }
 
-            // Polite delay
-            await new Promise((r) => setTimeout(r, 1500));
+            await new Promise((r) => setTimeout(r, 1200));
         }
     }
 
     // 2. Process Search Keywords
-    if (Array.isArray(searchKeywords) && searchKeywords.length > 0) {
-        log.info(`Searching AliExpress for ${searchKeywords.length} keywords...`);
+    if (effectiveSearchKeywords.length > 0) {
+        log.info(`Searching AliExpress for ${effectiveSearchKeywords.length} keywords...`);
 
-        for (const keyword of searchKeywords) {
+        for (const keyword of effectiveSearchKeywords) {
             log.info(`Searching AliExpress for: "${keyword}" (max: ${maxProducts})`);
 
             let searchUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(keyword)}.html`;
@@ -194,37 +263,76 @@ try {
             else if (sortBy === 'rating') searchUrl += '?sortType=evaluation_desc';
 
             try {
-                let html = null;
+                let results = [];
+                let lastReason = null;
 
-                try {
-                    const response = await gotScraping({
-                        url: searchUrl,
-                        proxyUrl,
-                        headers: {
-                            'accept-language': 'en-US,en;q=0.9',
-                            'cookie': `aep_usuc_f=site=glo&c_tp=USD&region=${shipToCountry}&b_locale=en_US;`,
-                            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+                const httpRes = await fetchHtmlWithHttp(searchUrl);
+                if (httpRes.pageState.state === 'ok') {
+                    results = parseAliExpressSearchHtml(httpRes.html);
+                } else {
+                    lastReason = httpRes.pageState.reason;
+                }
+
+                if (results.length === 0) {
+                    log.info(`Using browser fallback for AliExpress search "${keyword}"...`);
+                    const pwRes = await fetchWithPlaywright(searchUrl, {
+                        domExtractor: () => {
+                            const anchors = [...document.querySelectorAll('a[href*="/item/"]')];
+                            const seen = new Set();
+                            const out = [];
+                            for (const a of anchors) {
+                                const href = a.getAttribute('href') || '';
+                                const absUrl = href.startsWith('//') ? `https:${href}` : href.startsWith('http') ? href : `https://www.aliexpress.com${href}`;
+                                const clean = absUrl.split('?')[0];
+                                if (!/\/item\/\d{10,}\.html/.test(clean) || seen.has(clean)) continue;
+                                seen.add(clean);
+                                const card = a.closest('[class*="card"], [class*="gallery"], [class*="search-item"], div') || a;
+                                const titleEl = card.querySelector('h1, h2, h3, [class*="title"]');
+                                const title = (titleEl?.innerText || a.getAttribute('title') || a.innerText || '').trim();
+                                if (!title || title.length < 4) continue;
+                                const cardText = card.innerText || '';
+                                const priceMatch = cardText.match(/US\s*\$[\d.,]+|\$[\d.,]+/i);
+                                const soldMatch = cardText.match(/(\d[\d,]*\+?\s*sold)/i);
+                                const img = card.querySelector('img')?.getAttribute('src') || null;
+                                out.push({
+                                    url: clean,
+                                    title,
+                                    rawPrice: priceMatch ? priceMatch[0] : null,
+                                    ordersCount: soldMatch ? soldMatch[1] : null,
+                                    thumbnail: img && img.startsWith('//') ? `https:${img}` : img,
+                                    isFreeShipping: cardText.toLowerCase().includes('free shipping'),
+                                });
+                            }
+                            return out;
                         },
-                        timeout: { request: 30000 },
                     });
-                    html = response.body;
-                } catch (err) {
-                    await rotateOrDisableProxy(err);
-                    log.debug(`Direct search error: ${err.message}`);
+                    if (pwRes.pageState.state === 'ok') {
+                        results = parseAliExpressSearchHtml(pwRes.html);
+                        if (results.length === 0 && Array.isArray(pwRes.domData) && pwRes.domData.length > 0) {
+                            results = pwRes.domData.map((d) => ({
+                                itemId: extractAliExpressItemId(d.url),
+                                title: d.title,
+                                price: d.rawPrice ? parseFloat(d.rawPrice.replace(/[^0-9.]/g, '')) || null : null,
+                                currency: 'USD',
+                                ordersCount: d.ordersCount,
+                                ordersCountNumber: d.ordersCount ? parseInt(d.ordersCount.replace(/[^\d]/g, ''), 10) || 0 : 0,
+                                rating: null,
+                                shippingFee: d.isFreeShipping ? 'Free Shipping' : 'Paid Shipping',
+                                thumbnail: d.thumbnail,
+                                url: d.url,
+                                scrapedAt: new Date().toISOString(),
+                            }));
+                        }
+                    } else {
+                        lastReason = pwRes.pageState.reason || lastReason;
+                    }
                 }
 
-                if (!html || html.includes('punish') || html.includes('sec.aliexpress.com')) {
-                    const b = await getBrowser();
-                    const page = await b.newPage();
-                    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-                    await page.waitForTimeout(3000);
-                    html = await page.content();
-                    await page.close();
+                if (results.length === 0) {
+                    diagnostics.push({ target: searchUrl, reason: lastReason || `No search results parsed for "${keyword}"` });
                 }
 
-                const results = parseAliExpressSearchHtml(html);
                 const sliced = results.slice(0, maxProducts);
-
                 for (const item of sliced) {
                     item.searchKeyword = keyword;
                     await Actor.pushData(sanitizeRecord(item));
@@ -234,37 +342,36 @@ try {
                 }
 
                 log.info(`Extracted ${sliced.length} search results for "${keyword}"`);
-
             } catch (searchErr) {
                 log.error(`Error searching AliExpress for "${keyword}": ${searchErr.message}`);
             }
         }
     }
 
-    if (browser) {
-        await browser.close();
-    }
+    await closeBrowser();
 
-    // Save final executive summary
     const summary = {
         totalProductsScraped,
         freeShippingCount,
         totalOrdersCaptured,
-        shipToCountry,
+        shipToCountry: cleanCountry,
+        diagnostics,
         status: totalProductsScraped > 0 ? 'SUCCEEDED' : 'FAILED',
         scrapedAt: new Date().toISOString(),
     };
 
     await Actor.setValue('OUTPUT', summary);
     if (totalProductsScraped === 0) {
-        await Actor.fail('Extracted 0 products. Verify target URLs, keywords, or proxy configuration.');
+        const hint = diagnostics[0]?.reason ? ` (${diagnostics[0].reason})` : '';
+        await Actor.fail(`Extracted 0 products. Verify target URLs, keywords, or proxy configuration${hint}.`);
     }
     log.info(`AliExpress Scraping finished successfully! Total items: ${totalProductsScraped}`);
-
 } catch (err) {
+    await closeBrowser();
     log.error(`Fatal execution error: ${err.message}`, { stack: err.stack });
     await Actor.setValue('OUTPUT', { status: 'FAILED', error: err.message });
     await Actor.fail(err.message);
 } finally {
+    await closeBrowser();
     await Actor.exit();
 }
