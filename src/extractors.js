@@ -2,6 +2,19 @@
  * AliExpress Product & Search Extraction Handlers
  */
 
+function decodeHtmlEntities(str) {
+    if (!str || typeof str !== 'string') return str;
+    return str
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#x27;/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 /**
  * Extract numerical AliExpress item ID from URL
  */
@@ -9,6 +22,47 @@ export function extractAliExpressItemId(url) {
     if (!url || typeof url !== 'string') return null;
     const match = url.match(/\/item\/(\d{10,})\.html/) || url.match(/item\/(\d{10,})/) || url.match(/itemId=(\d{10,})/);
     return match ? match[1] : null;
+}
+
+export function detectAliExpressPageState(html, statusCode = 200) {
+    if (statusCode === 404) {
+        return { state: 'unavailable', reason: 'HTTP 404 (Product not found on AliExpress)' };
+    }
+    if (statusCode === 503 || statusCode === 429 || statusCode === 403) {
+        return { state: 'antibot_challenge', reason: `HTTP ${statusCode} AliExpress anti-bot challenge` };
+    }
+    if (statusCode >= 400) {
+        return { state: 'http_error', reason: `HTTP ${statusCode}` };
+    }
+    if (!html || typeof html !== 'string' || html.trim().length < 20) {
+        return { state: 'empty_body', reason: 'Empty or truncated HTML response' };
+    }
+    const lower = html.toLowerCase();
+    if (
+        lower.includes('sec.aliexpress.com') ||
+        lower.includes('punish') ||
+        lower.includes('x5sec') ||
+        lower.includes('_____tmd_____') ||
+        lower.includes('baxia-dialog')
+    ) {
+        return {
+            state: 'antibot_challenge',
+            reason: 'AliExpress anti-bot / captcha challenge detected; use Apify RESIDENTIAL proxy',
+        };
+    }
+    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const pageTitle = titleMatch ? decodeHtmlEntities(titleMatch[1]) : '';
+    if (
+        /page not found|404/i.test(pageTitle) ||
+        lower.includes('sorry, the page you requested can not be found') ||
+        lower.includes('this product is no longer available')
+    ) {
+        return { state: 'unavailable', reason: pageTitle || 'Product Not Available' };
+    }
+    if (html.trim().length < 200) {
+        return { state: 'empty_body', reason: 'Empty or truncated HTML response' };
+    }
+    return { state: 'ok', reason: pageTitle || 'OK' };
 }
 
 /**
@@ -75,8 +129,12 @@ export function parseAliExpressProductHtml(html, url = '') {
     let title = ldData?.name || null;
     if (!title) {
         const titleMatch = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) ||
-                           html.match(/data-pl="product-title"[^>]*>([\s\S]*?)<\/h1>/i);
-        if (titleMatch) title = titleMatch[1].replace(/<[^>]+>/g, '').trim();
+                           html.match(/data-pl="product-title"[^>]*>([\s\S]*?)<\/h1>/i) ||
+                           html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
+                           html.match(/"subject"\s*:\s*"([^"]{5,})"/i);
+        if (titleMatch) title = decodeHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, ''));
+    } else {
+        title = decodeHtmlEntities(title);
     }
 
     // Price
@@ -170,6 +228,8 @@ export function parseAliExpressProductHtml(html, url = '') {
 
     const thumbnail = images[0] || (ldData?.image ? (Array.isArray(ldData.image) ? ldData.image[0] : ldData.image) : null);
 
+    if (!title) return null;
+
     return {
         itemId,
         title,
@@ -200,7 +260,8 @@ export function parseAliExpressSearchHtml(html) {
     const results = [];
     if (!html) return results;
 
-    const cards = [...html.matchAll(/class="[^"]*(?:search-item-card|list--gallery--|search-card-item)[^"]*"[\s\S]*?(?=(?:class="[^"]*(?:search-item-card|list--gallery--|search-card-item)"|$))/gi)];
+    const seenIds = new Set();
+    const cards = [...html.matchAll(/class="[^"]*(?:search-item-card|list--gallery--|search-card-item|multi--container)[^"]*"[\s\S]*?(?=(?:class="[^"]*(?:search-item-card|list--gallery--|search-card-item|multi--container)"|$))/gi)];
 
     for (const c of cards) {
         const cardHtml = c[0];
@@ -214,10 +275,12 @@ export function parseAliExpressSearchHtml(html) {
         if (href.startsWith('//')) href = `https:${href}`;
         const cleanUrl = href.split('?')[0];
         const itemId = extractAliExpressItemId(cleanUrl);
+        if (itemId && seenIds.has(itemId)) continue;
 
         // Title
-        const titleMatch = cardHtml.match(/class="[^"]*(?:multi--titleText--|title--)[^"]*"[^>]*>([\s\S]*?)<\/(?:h1|h3|span)>/i);
-        const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '').trim() : null;
+        const titleMatch = cardHtml.match(/class="[^"]*(?:multi--titleText--|title--)[^"]*"[^>]*>([\s\S]*?)<\/(?:h1|h3|span)>/i) ||
+                           cardHtml.match(/title="([^"]{6,})"/i);
+        const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, '')) : null;
         if (!title) continue;
 
         // Price
@@ -246,6 +309,7 @@ export function parseAliExpressSearchHtml(html) {
         // Free Shipping
         const isFreeShipping = cardHtml.toLowerCase().includes('free shipping');
 
+        if (itemId) seenIds.add(itemId);
         results.push({
             itemId,
             title,
