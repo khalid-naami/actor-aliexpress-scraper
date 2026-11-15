@@ -6,16 +6,17 @@
     "productUrls": {
       "title": "Direct AliExpress Product URLs",
       "type": "array",
-      "description": "List of direct AliExpress item links (e.g. https://www.aliexpress.com/item/1005006245389123.html).",
-      "prefill": [
-        "https://www.aliexpress.com/item/1005006245389123.html"
-      ],
+      "description": "List of direct AliExpress item links (e.g. https://www.aliexpress.com/item/1005006245389123.html). Leave empty to search by keywords.",
+      "prefill": [],
       "editor": "json"
     },
     "searchKeywords": {
       "title": "Search Keywords",
       "type": "array",
       "description": "Keywords to search for products on AliExpress (e.g. 'sunset lamp', 'wireless earbuds').",
+      "prefill": [
+        "wireless earbuds"
+      ],
       "editor": "json"
     },
     "sortBy": {
